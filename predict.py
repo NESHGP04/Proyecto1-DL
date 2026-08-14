@@ -26,13 +26,32 @@ from preprocessing import AmesPreprocessor, TARGET  # noqa: E402
 from model import MLP, rmse, get_device  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PP_PATH = os.path.join(HERE, "models", "preprocessor.joblib")
-BUNDLE_PATH = os.path.join(HERE, "models", "mlp_ensemble.pt")
+# Preferimos el modelo v2 (feature engineering: target encoding + ensemble ampliado);
+# si no existe, caemos al v1.
+V2_PP = os.path.join(HERE, "models", "preprocessor_v2.joblib")
+V2_BUNDLE = os.path.join(HERE, "models", "mlp_ensemble_v2.pt")
+V1_PP = os.path.join(HERE, "models", "preprocessor.joblib")
+V1_BUNDLE = os.path.join(HERE, "models", "mlp_ensemble.pt")
+
+
+def _apply_target_encoding(df, bundle):
+    """Aplica los mapas de target encoding guardados (v2). Devuelve matriz (n, n_te_cols)."""
+    cols = bundle["te_cols"]
+    gm = bundle["te_global_mean"]
+    maps = bundle["te_maps"]
+    return np.column_stack(
+        [df[c].map(maps[c]).fillna(gm).values for c in cols]
+    ).astype("float32")
 
 
 def load_ensemble(device):
-    pp = joblib.load(PP_PATH)
-    bundle = torch.load(BUNDLE_PATH, map_location=device, weights_only=False)
+    if os.path.exists(V2_BUNDLE) and os.path.exists(V2_PP):
+        pp_path, bundle_path, version = V2_PP, V2_BUNDLE, "v2 (target encoding + ensemble)"
+    else:
+        pp_path, bundle_path, version = V1_PP, V1_BUNDLE, "v1"
+    pp = joblib.load(pp_path)
+    bundle = torch.load(bundle_path, map_location=device, weights_only=False)
+    bundle["_version"] = version
     cfg = bundle["final_cfg"]
     models = []
     for sd in bundle["state_dicts"]:
@@ -45,9 +64,12 @@ def load_ensemble(device):
 
 
 @torch.no_grad()
-def predict(df: pd.DataFrame, pp: AmesPreprocessor, models, device) -> np.ndarray:
+def predict(df: pd.DataFrame, pp: AmesPreprocessor, models, bundle, device) -> np.ndarray:
     """Devuelve predicciones en DÓLARES (promedio del ensemble)."""
-    X = torch.tensor(pp.transform(df), dtype=torch.float32).to(device)
+    X = pp.transform(df)
+    if "te_maps" in bundle:  # modelo v2: añade columnas de target encoding
+        X = np.hstack([X, _apply_target_encoding(df, bundle)])
+    X = torch.tensor(X, dtype=torch.float32).to(device)
     preds_log = np.mean([m(X).cpu().numpy() for m in models], axis=0)
     return AmesPreprocessor.target_from_log(preds_log)
 
@@ -60,14 +82,14 @@ def main():
 
     device = get_device()
     pp, models, bundle = load_ensemble(device)
-    print(f"Ensemble cargado: {len(models)} modelos | device={device}")
+    print(f"Modelo {bundle['_version']} | {len(models)} modelos | device={device}")
     print(f"(OOF en entrenamiento: RMSE log={bundle['oof_rmse_log']:.4f}, "
           f"${bundle['oof_rmse_usd']:,.0f})")
 
     df = pd.read_csv(args.test)
     print(f"Test: {df.shape[0]} filas")
 
-    y_pred = predict(df, pp, models, device)
+    y_pred = predict(df, pp, models, bundle, device)
 
     ids = df["Id"] if "Id" in df.columns else np.arange(len(df))
     out = pd.DataFrame({"Id": ids, "SalePrice_pred": np.round(y_pred, 2)})
