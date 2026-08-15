@@ -92,7 +92,8 @@ def main():
     y_pred = predict(df, pp, models, bundle, device)
 
     ids = df["Id"] if "Id" in df.columns else np.arange(len(df))
-    out = pd.DataFrame({"Id": ids, "SalePrice_pred": np.round(y_pred, 2)})
+    # Formato de entrega requerido: columnas exactamente "Id,Prediction"
+    out = pd.DataFrame({"Id": ids, "Prediction": np.round(y_pred, 2)})
     out.to_csv(args.out, index=False)
     print(f"Predicciones escritas en: {args.out}")
 
